@@ -1,22 +1,22 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: PPTX Voiceover Studio API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: presentations
+    description: Presentation management
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +24,138 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /presentations:
+    get:
+      operationId: listPresentations
+      tags: [presentations]
+      summary: List all uploaded presentations
+      responses:
+        "200":
+          description: List of presentations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Presentation"
+
+  /presentations/{id}:
+    get:
+      operationId: getPresentation
+      tags: [presentations]
+      summary: Get a presentation by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Presentation details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Presentation"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deletePresentation
+      tags: [presentations]
+      summary: Delete a presentation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+
+  /presentations/{id}/slides/{slideIndex}/audio:
+    delete:
+      operationId: deleteSlideAudio
+      tags: [presentations]
+      summary: Delete audio for a specific slide
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: slideIndex
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Audio deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Slide"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /presentations/{id}/export:
+    post:
+      operationId: startExport
+      tags: [presentations]
+      summary: Start MP4 export for a presentation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Export started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJob"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      operationId: getExportStatus
+      tags: [presentations]
+      summary: Get export status for a presentation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Export job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJob"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +166,57 @@ components:
       required:
         - status
 
+    Presentation:
+      type: object
+      required: [id, filename, slideCount, slides, createdAt]
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        slideCount:
+          type: integer
+        slides:
+          type: array
+          items:
+            $ref: "#/components/schemas/Slide"
+        createdAt:
+          type: string
+        exportStatus:
+          type: ["string", "null"]
+
+    Slide:
+      type: object
+      required: [index, hasAudio]
+      properties:
+        index:
+          type: integer
+        hasAudio:
+          type: boolean
+        audioDurationSeconds:
+          type: ["number", "null"]
+        imageUrl:
+          type: ["string", "null"]
+
+    ExportJob:
+      type: object
+      required: [presentationId, status]
+      properties:
+        presentationId:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, done, error]
+        progress:
+          type: ["integer", "null"]
+        downloadUrl:
+          type: ["string", "null"]
+        error:
+          type: ["string", "null"]
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string

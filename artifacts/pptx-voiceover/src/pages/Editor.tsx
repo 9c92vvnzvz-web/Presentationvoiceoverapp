@@ -1,15 +1,15 @@
 import { useState, useRef } from "react";
-import { useParams, useLocation, Link } from "wouter";
+import { useParams, Link } from "wouter";
 import { Mic, Square, ArrowLeft, ArrowRight, FileVideo, ChevronLeft, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useGetPresentation, getGetPresentationQueryKey, useDeleteSlideAudio } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import html2canvas from "html2canvas";
+import PptxSlideViewer from "@/components/PptxSlideViewer";
 
 export default function Editor() {
   const { id } = useParams();
-  const [, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -32,16 +32,18 @@ export default function Editor() {
   const handleRecordStart = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+      const recorder = new MediaRecorder(stream, { mimeType });
 
       audioChunksRef.current = [];
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data);
       };
-
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
         await uploadAudioAndImage(audioBlob);
       };
 
@@ -49,12 +51,8 @@ export default function Editor() {
       setMediaRecorder(recorder);
       setIsRecording(true);
       setRecordingTime(0);
-
-      timerRef.current = setInterval(() => {
-        setRecordingTime((prev) => prev + 1);
-      }, 1000);
-    } catch (err) {
-      console.error("Mic error:", err);
+      timerRef.current = setInterval(() => setRecordingTime((p) => p + 1), 1000);
+    } catch {
       toast({
         title: "Microphone access denied",
         description: "Please allow microphone access in your browser settings and try again.",
@@ -75,7 +73,6 @@ export default function Editor() {
     if (!id) return;
     setIsUploading(true);
     try {
-      // 1. Upload audio
       const audioForm = new FormData();
       audioForm.append("audio", audioBlob, `slide-${currentSlideIndex}.webm`);
       const audioRes = await fetch(
@@ -84,13 +81,12 @@ export default function Editor() {
       );
       if (!audioRes.ok) throw new Error("Audio upload failed");
 
-      // 2. Capture slide container as PNG and upload
       if (slideContainerRef.current) {
         try {
           const canvas = await html2canvas(slideContainerRef.current, {
             useCORS: true,
             allowTaint: true,
-            backgroundColor: "#1a1a2e",
+            backgroundColor: "#ffffff",
           });
           await new Promise<void>((resolve) => {
             canvas.toBlob(async (imgBlob) => {
@@ -132,7 +128,7 @@ export default function Editor() {
     );
   };
 
-  const formatTime = (s: number) =>
+  const fmt = (s: number) =>
     `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
 
   if (isLoading || !presentation) {
@@ -144,8 +140,6 @@ export default function Editor() {
   }
 
   const currentSlide = presentation.slides.find((s) => s.index === currentSlideIndex);
-  const isLastSlide = currentSlideIndex === presentation.slideCount - 1;
-  const isFirstSlide = currentSlideIndex === 0;
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden">
@@ -173,7 +167,7 @@ export default function Editor() {
 
       <div className="flex flex-1 overflow-hidden">
         {/* Slide Strip */}
-        <div className="w-44 border-r border-border bg-card flex flex-col shrink-0">
+        <div className="w-44 border-r border-border bg-muted/30 flex flex-col shrink-0">
           <div className="px-3 py-2 border-b border-border text-xs font-medium text-muted-foreground uppercase tracking-wider">
             Slides ({presentation.slideCount})
           </div>
@@ -185,23 +179,23 @@ export default function Editor() {
                 <button
                   key={idx}
                   onClick={() => setCurrentSlideIndex(idx)}
-                  className={`w-full relative rounded border-2 overflow-hidden transition-all text-left ${
+                  className={`w-full relative rounded border-2 overflow-hidden transition-all text-left bg-white shadow-sm ${
                     isActive ? "border-primary" : "border-transparent hover:border-border"
                   }`}
                   data-testid={`slide-thumb-${idx}`}
                 >
-                  <div className="aspect-[16/9] bg-secondary flex items-center justify-center">
-                    {slide?.imageUrl ? (
-                      <img
-                        src={slide.imageUrl}
-                        alt={`Slide ${idx + 1}`}
-                        className="w-full h-full object-cover"
+                  <div className="aspect-[16/9] bg-white flex items-center justify-center overflow-hidden">
+                    {id ? (
+                      <PptxSlideViewer
+                        presentationId={id}
+                        slideIndex={idx}
+                        className="w-full h-full"
                       />
                     ) : (
-                      <span className="text-xl font-black text-muted-foreground/30">{idx + 1}</span>
+                      <span className="text-lg font-black text-muted-foreground/30">{idx + 1}</span>
                     )}
                   </div>
-                  <div className="absolute top-1 left-1 bg-background/80 text-[10px] px-1 rounded font-mono text-muted-foreground">
+                  <div className="absolute top-1 left-1 bg-white/80 text-[10px] px-1 rounded font-mono text-gray-500">
                     {idx + 1}
                   </div>
                   {slide?.hasAudio && (
@@ -216,41 +210,33 @@ export default function Editor() {
         </div>
 
         {/* Main area */}
-        <div className="flex-1 flex flex-col bg-[#0f0f1a]">
+        <div className="flex-1 flex flex-col bg-muted/20">
           {/* Slide Preview */}
-          <div className="flex-1 flex items-center justify-center p-6">
+          <div className="flex-1 flex items-center justify-center p-8">
             <div
               ref={slideContainerRef}
-              className="aspect-[16/9] w-full max-w-4xl bg-[#1a1a2e] rounded-lg shadow-2xl border border-white/5 overflow-hidden flex items-center justify-center relative"
+              className="aspect-[16/9] w-full max-w-4xl bg-white rounded-lg shadow-xl border border-border overflow-hidden relative"
               data-testid="slide-preview"
             >
-              {currentSlide?.imageUrl ? (
-                <img
-                  src={currentSlide.imageUrl}
-                  alt={`Slide ${currentSlideIndex + 1}`}
-                  className="w-full h-full object-contain"
-                  crossOrigin="anonymous"
+              {id && (
+                <PptxSlideViewer
+                  presentationId={id}
+                  slideIndex={currentSlideIndex}
+                  className="w-full h-full"
                 />
-              ) : (
-                <div className="text-center select-none">
-                  <div className="text-[120px] font-black text-white/5 leading-none">
-                    {currentSlideIndex + 1}
-                  </div>
-                  <p className="text-white/20 text-sm mt-2">Slide {currentSlideIndex + 1}</p>
-                </div>
               )}
 
-              {/* Recording indicator overlay */}
+              {/* Recording indicator */}
               {isRecording && (
-                <div className="absolute top-3 right-3 flex items-center gap-2 bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5">
+                <div className="absolute top-3 right-3 flex items-center gap-2 bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5 pointer-events-none">
                   <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                  <span className="text-white text-xs font-mono font-bold">{formatTime(recordingTime)}</span>
+                  <span className="text-white text-xs font-mono font-bold">{fmt(recordingTime)}</span>
                 </div>
               )}
 
               {isUploading && (
-                <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
-                  <div className="text-white text-sm animate-pulse">Saving recording…</div>
+                <div className="absolute inset-0 bg-white/60 flex items-center justify-center pointer-events-none">
+                  <div className="text-sm text-gray-500 animate-pulse">Saving recording…</div>
                 </div>
               )}
             </div>
@@ -265,7 +251,7 @@ export default function Editor() {
                   variant="outline"
                   size="icon"
                   onClick={() => setCurrentSlideIndex((p) => Math.max(0, p - 1))}
-                  disabled={isFirstSlide || isRecording}
+                  disabled={currentSlideIndex === 0 || isRecording}
                   data-testid="button-prev-slide"
                 >
                   <ArrowLeft className="w-4 h-4" />
@@ -279,7 +265,7 @@ export default function Editor() {
                   onClick={() =>
                     setCurrentSlideIndex((p) => Math.min(presentation.slideCount - 1, p + 1))
                   }
-                  disabled={isLastSlide || isRecording}
+                  disabled={currentSlideIndex === presentation.slideCount - 1 || isRecording}
                   data-testid="button-next-slide"
                 >
                   <ArrowRight className="w-4 h-4" />
@@ -292,7 +278,7 @@ export default function Editor() {
                   <Button
                     variant="destructive"
                     size="lg"
-                    className="w-16 h-16 rounded-full shadow-lg shadow-red-900/40"
+                    className="w-16 h-16 rounded-full shadow-lg"
                     onClick={handleRecordStop}
                     data-testid="button-stop-record"
                   >
@@ -301,10 +287,10 @@ export default function Editor() {
                 ) : (
                   <Button
                     size="lg"
-                    className={`w-16 h-16 rounded-full shadow-lg transition-all ${
+                    className={`w-16 h-16 rounded-full shadow-lg ${
                       currentSlide?.hasAudio
                         ? "bg-secondary border border-border text-foreground hover:bg-secondary/80"
-                        : "bg-primary hover:bg-primary/90 shadow-primary/30"
+                        : "bg-primary hover:bg-primary/90"
                     }`}
                     onClick={handleRecordStart}
                     disabled={isUploading}
@@ -319,13 +305,13 @@ export default function Editor() {
                     : isUploading
                     ? "Saving…"
                     : currentSlide?.hasAudio
-                    ? `Recorded · ${formatTime(currentSlide.audioDurationSeconds ?? 0)}`
+                    ? `Recorded · ${fmt(currentSlide.audioDurationSeconds ?? 0)}`
                     : "Click to record voiceover"}
                 </span>
               </div>
 
               {/* Delete */}
-              <div className="w-20 flex justify-end">
+              <div className="w-24 flex justify-end">
                 {currentSlide?.hasAudio && !isRecording && (
                   <Button
                     variant="ghost"

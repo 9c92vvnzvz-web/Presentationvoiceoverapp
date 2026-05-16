@@ -76,6 +76,7 @@
   },
   "dependencies": {
     "html2canvas": "^1.4.1",
+    "jszip": "^3.10.1",
     "pptxjs": "^0.0.0"
   }
 }

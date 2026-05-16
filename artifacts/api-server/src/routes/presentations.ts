@@ -7,12 +7,34 @@ import { v4 as uuidv4 } from "uuid";
 import JSZip from "jszip";
 import ffmpeg from "fluent-ffmpeg";
 
-const FFMPEG_PATH = "/nix/store/y7m7h744qpw8hidkkxnhx7wzgv59w287-replit-runtime-path/bin/ffmpeg";
-const FFPROBE_PATH = "/nix/store/y7m7h744qpw8hidkkxnhx7wzgv59w287-replit-runtime-path/bin/ffprobe";
-const MAGICK_PATH = "/nix/store/y7m7h744qpw8hidkkxnhx7wzgv59w287-replit-runtime-path/bin/magick";
+function findBin(name: string): string {
+  // 1. Try which
+  try {
+    const p = execSync(`which ${name} 2>/dev/null`, { timeout: 3000 }).toString().trim();
+    if (p && fs.existsSync(p)) return p;
+  } catch {}
+  // 2. Scan common nix store location
+  try {
+    const p = execSync(
+      `ls /nix/store/*/bin/${name} 2>/dev/null | head -1`,
+      { shell: true, timeout: 3000 }
+    ).toString().trim().split("\n")[0];
+    if (p && fs.existsSync(p)) return p;
+  } catch {}
+  // 3. Runtime path hint
+  const hint = `/nix/store/y7m7h744qpw8hidkkxnhx7wzgv59w287-replit-runtime-path/bin/${name}`;
+  if (fs.existsSync(hint)) return hint;
+  return name;
+}
 
-if (fs.existsSync(FFMPEG_PATH)) ffmpeg.setFfmpegPath(FFMPEG_PATH);
-if (fs.existsSync(FFPROBE_PATH)) ffmpeg.setFfprobePath(FFPROBE_PATH);
+const FFMPEG_PATH = findBin("ffmpeg");
+const FFPROBE_PATH = findBin("ffprobe");
+const MAGICK_PATH = findBin("magick");
+
+console.log(`[tools] ffmpeg=${FFMPEG_PATH} ffprobe=${FFPROBE_PATH} magick=${MAGICK_PATH}`);
+
+ffmpeg.setFfmpegPath(FFMPEG_PATH);
+ffmpeg.setFfprobePath(FFPROBE_PATH);
 
 const router = Router();
 

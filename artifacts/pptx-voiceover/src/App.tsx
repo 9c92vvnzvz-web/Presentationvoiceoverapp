@@ -13,7 +13,7 @@ const queryClient = new QueryClient();
 
 function ThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
-    document.documentElement.classList.add("dark");
+    document.documentElement.classList.remove("dark");
   }, []);
 
   return <>{children}</>;

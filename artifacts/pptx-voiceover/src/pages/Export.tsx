@@ -1,14 +1,15 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, Link } from "wouter";
-import { FileVideo, ArrowLeft, Download, CheckCircle2, Circle, Loader2, Play } from "lucide-react";
+import { FileVideo, ArrowLeft, Download, CheckCircle2, Loader2, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { 
-  useGetPresentation, 
-  getGetPresentationQueryKey, 
+import {
+  useGetPresentation,
+  getGetPresentationQueryKey,
   useStartExport,
-  useGetExportStatus
+  useGetExportStatus,
+  getGetExportStatusQueryKey,
 } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -17,34 +18,44 @@ export default function Export() {
   const { toast } = useToast();
   const [isExporting, setIsExporting] = useState(false);
 
-  const { data: presentation, isLoading: isPresLoading } = useGetPresentation(id as string, {
-    query: { enabled: !!id, queryKey: getGetPresentationQueryKey(id as string) }
-  });
+  const { data: presentation, isLoading: isPresLoading } = useGetPresentation(
+    id as string,
+    { query: { enabled: !!id, queryKey: getGetPresentationQueryKey(id as string) } }
+  );
 
   const { data: exportJob } = useGetExportStatus(id as string, {
-    query: { 
+    query: {
       enabled: !!id && isExporting,
-      refetchInterval: isExporting ? 2000 : false
-    }
+      queryKey: getGetExportStatusQueryKey(id as string),
+      refetchInterval: isExporting ? 2000 : false,
+    },
   });
 
   const startExport = useStartExport();
 
   useEffect(() => {
-    if (exportJob?.status === 'done') {
+    if (!exportJob) return;
+    if (exportJob.status === "done") {
       setIsExporting(false);
       toast({ title: "Export complete", description: "Your video is ready to download." });
-    } else if (exportJob?.status === 'error') {
+    } else if (exportJob.status === "error") {
       setIsExporting(false);
-      toast({ title: "Export failed", description: exportJob.error || "Something went wrong.", variant: "destructive" });
-    } else if (exportJob?.status === 'processing' || exportJob?.status === 'pending') {
+      toast({
+        title: "Export failed",
+        description: exportJob.error || "Something went wrong.",
+        variant: "destructive",
+      });
+    } else if (exportJob.status === "processing" || exportJob.status === "pending") {
       setIsExporting(true);
     }
-  }, [exportJob?.status, toast]);
+  }, [exportJob?.status]);
 
-  // Initial check if an export is already running
+  // Resume polling if a prior export is still in progress
   useEffect(() => {
-    if (presentation?.exportStatus === 'processing' || presentation?.exportStatus === 'pending') {
+    if (
+      presentation?.exportStatus === "processing" ||
+      presentation?.exportStatus === "pending"
+    ) {
       setIsExporting(true);
     }
   }, [presentation?.exportStatus]);
@@ -52,143 +63,178 @@ export default function Export() {
   const handleExport = () => {
     if (!id) return;
     setIsExporting(true);
-    startExport.mutate({ id }, {
-      onError: () => {
-        setIsExporting(false);
-        toast({ title: "Failed to start export", variant: "destructive" });
+    startExport.mutate(
+      { id },
+      {
+        onError: (err: unknown) => {
+          setIsExporting(false);
+          const msg =
+            err && typeof err === "object" && "message" in err
+              ? String((err as { message: string }).message)
+              : "Could not start export.";
+          toast({ title: "Export failed to start", description: msg, variant: "destructive" });
+        },
       }
-    });
+    );
   };
 
   if (isPresLoading || !presentation) {
-    return <div className="min-h-screen flex items-center justify-center"><p>Loading...</p></div>;
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-muted-foreground animate-pulse">Loading…</div>
+      </div>
+    );
   }
 
-  const recordedSlidesCount = presentation.slides.filter(s => s.hasAudio).length;
-  const allSlidesRecorded = recordedSlidesCount === presentation.slideCount;
+  const recordedCount = presentation.slides.filter((s) => s.hasAudio).length;
+  const totalSlides = presentation.slideCount;
+  const noneRecorded = recordedCount === 0;
+  const allRecorded = recordedCount === totalSlides;
+  const exportDone = exportJob?.status === "done";
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">
-      <header className="h-14 border-b border-border bg-card flex items-center px-4 shrink-0 sticky top-0">
+      <header className="h-14 border-b border-border bg-card flex items-center px-4 shrink-0 sticky top-0 z-10">
         <Link href={`/editor/${id}`}>
-          <Button variant="ghost" size="sm" className="gap-2">
+          <Button variant="ghost" size="sm" className="gap-2" data-testid="button-back-editor">
             <ArrowLeft className="w-4 h-4" />
             Back to Editor
           </Button>
         </Link>
+        <div className="ml-4 font-semibold text-sm truncate max-w-xs text-muted-foreground">
+          {presentation.filename}
+        </div>
       </header>
 
-      <main className="flex-1 container mx-auto px-4 py-12 max-w-3xl">
-        <h1 className="text-3xl font-bold mb-8">Export Project</h1>
+      <main className="flex-1 container mx-auto px-4 py-10 max-w-2xl space-y-6">
+        <h1 className="text-2xl font-bold" data-testid="text-export-title">Export Video</h1>
 
-        <div className="grid gap-8">
-          
-          <Card>
-            <CardHeader>
-              <CardTitle>Project Summary</CardTitle>
-              <CardDescription>{presentation.filename}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-between mb-6 p-4 rounded-lg bg-secondary/50">
-                <div className="text-center flex-1">
-                  <div className="text-3xl font-bold text-primary">{presentation.slideCount}</div>
-                  <div className="text-sm text-muted-foreground">Total Slides</div>
-                </div>
-                <div className="w-px h-12 bg-border"></div>
-                <div className="text-center flex-1">
-                  <div className="text-3xl font-bold text-primary">{recordedSlidesCount}</div>
-                  <div className="text-sm text-muted-foreground">Recorded Slides</div>
-                </div>
+        {/* Summary */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Presentation Summary</CardTitle>
+            <CardDescription>{presentation.filename}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="rounded-lg bg-secondary/50 p-4 text-center">
+                <div className="text-3xl font-bold text-primary" data-testid="text-total-slides">{totalSlides}</div>
+                <div className="text-xs text-muted-foreground mt-1">Total Slides</div>
               </div>
-
-              {!allSlidesRecorded && (
-                <div className="text-sm text-amber-500 bg-amber-500/10 p-3 rounded-md mb-6">
-                  Warning: You have {presentation.slideCount - recordedSlidesCount} slides without voiceover. They will appear silently in the final video.
+              <div className="rounded-lg bg-secondary/50 p-4 text-center">
+                <div
+                  className={`text-3xl font-bold ${recordedCount > 0 ? "text-primary" : "text-muted-foreground"}`}
+                  data-testid="text-recorded-slides"
+                >
+                  {recordedCount}
                 </div>
-              )}
-
-              <div className="space-y-3">
-                <h4 className="font-medium text-sm text-muted-foreground mb-2">Slide Status</h4>
-                <div className="grid grid-cols-5 md:grid-cols-8 lg:grid-cols-10 gap-2">
-                  {Array.from({ length: presentation.slideCount }).map((_, i) => {
-                    const hasAudio = presentation.slides.find(s => s.index === i)?.hasAudio;
-                    return (
-                      <div 
-                        key={i} 
-                        className={`aspect-square rounded-md flex items-center justify-center font-mono text-sm border-2 ${hasAudio ? 'border-primary text-primary bg-primary/10' : 'border-border text-muted-foreground'}`}
-                        title={`Slide ${i + 1}: ${hasAudio ? 'Recorded' : 'Empty'}`}
-                      >
-                        {i + 1}
-                      </div>
-                    );
-                  })}
-                </div>
+                <div className="text-xs text-muted-foreground mt-1">Recorded</div>
               </div>
-            </CardContent>
-          </Card>
+            </div>
 
-          <Card className="border-primary/20 bg-primary/5">
-            <CardContent className="pt-6">
-              
-              {exportJob?.status === 'done' ? (
-                <div className="text-center py-6">
-                  <div className="w-16 h-16 rounded-full bg-green-500/20 text-green-500 flex items-center justify-center mx-auto mb-4">
-                    <CheckCircle2 className="w-8 h-8" />
-                  </div>
-                  <h3 className="text-xl font-bold mb-2">Export Complete!</h3>
-                  <p className="text-muted-foreground mb-6">Your video is ready to download.</p>
-                  
-                  <Button asChild size="lg" className="gap-2">
-                    <a href={exportJob.downloadUrl || `/api/presentations/${id}/export/download`} download>
-                      <Download className="w-5 h-5" />
-                      Download MP4 Video
-                    </a>
-                  </Button>
+            {!allRecorded && recordedCount > 0 && (
+              <div className="flex items-start gap-2 text-sm text-amber-400 bg-amber-400/10 border border-amber-400/20 rounded-md p-3">
+                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                <span>
+                  {totalSlides - recordedCount} slide{totalSlides - recordedCount > 1 ? "s" : ""} without a voiceover will be skipped in the export.
+                </span>
+              </div>
+            )}
+
+            {noneRecorded && (
+              <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-md p-3">
+                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                <span>
+                  No voiceovers recorded yet. Go back to the editor and record at least one slide.
+                </span>
+              </div>
+            )}
+
+            {/* Slide grid */}
+            <div>
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+                Slide Status
+              </p>
+              <div className="grid grid-cols-8 gap-1.5">
+                {Array.from({ length: totalSlides }).map((_, i) => {
+                  const slide = presentation.slides.find((s) => s.index === i);
+                  return (
+                    <div
+                      key={i}
+                      className={`aspect-square rounded flex items-center justify-center text-xs font-mono border ${
+                        slide?.hasAudio
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground/50"
+                      }`}
+                      title={`Slide ${i + 1}: ${slide?.hasAudio ? "Recorded" : "No audio"}`}
+                      data-testid={`slide-status-${i}`}
+                    >
+                      {i + 1}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Export action */}
+        <Card className={exportDone ? "border-green-500/30 bg-green-500/5" : "border-primary/20 bg-primary/5"}>
+          <CardContent className="pt-6">
+            {exportDone ? (
+              <div className="text-center py-4 space-y-4">
+                <div className="w-14 h-14 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center mx-auto">
+                  <CheckCircle2 className="w-7 h-7" />
                 </div>
-              ) : (
-                <div className="flex flex-col items-center py-4">
-                  
-                  <div className="w-full max-w-md space-y-6">
-                    {isExporting ? (
-                      <div className="space-y-4">
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="font-medium flex items-center gap-2">
-                            <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                            Rendering video...
-                          </span>
-                          <span className="text-muted-foreground font-mono">
-                            {exportJob?.progress ? Math.round(exportJob.progress) : 0}%
-                          </span>
-                        </div>
-                        <Progress value={exportJob?.progress || 0} className="h-2" />
-                        <p className="text-xs text-center text-muted-foreground">
-                          This may take a few minutes depending on presentation length.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="text-center">
-                        <Button 
-                          size="lg" 
-                          className="w-full text-lg h-14 gap-2" 
-                          onClick={handleExport}
-                        >
-                          <FileVideo className="w-6 h-6" />
-                          Start Video Export
-                        </Button>
-                        <p className="text-sm text-muted-foreground mt-4">
-                          Renders an MP4 video at 1080p, synchronizing your voiceovers with the slides.
-                        </p>
-                      </div>
-                    )}
-                  </div>
-
+                <div>
+                  <h3 className="text-lg font-bold">Export Complete</h3>
+                  <p className="text-sm text-muted-foreground mt-1">Your MP4 video is ready.</p>
                 </div>
-              )}
-
-            </CardContent>
-          </Card>
-
-        </div>
+                <Button asChild size="lg" className="gap-2" data-testid="button-download">
+                  <a
+                    href={exportJob?.downloadUrl ?? `/api/presentations/${id}/export/download`}
+                    download
+                  >
+                    <Download className="w-4 h-4" />
+                    Download MP4
+                  </a>
+                </Button>
+              </div>
+            ) : isExporting ? (
+              <div className="space-y-4 py-2">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="flex items-center gap-2 font-medium">
+                    <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                    Rendering video…
+                  </span>
+                  <span className="font-mono text-muted-foreground">
+                    {exportJob?.progress ?? 0}%
+                  </span>
+                </div>
+                <Progress value={exportJob?.progress ?? 0} className="h-2" data-testid="export-progress" />
+                <p className="text-xs text-center text-muted-foreground">
+                  This can take a minute. You can keep this tab open.
+                </p>
+              </div>
+            ) : (
+              <div className="text-center space-y-3 py-2">
+                <Button
+                  size="lg"
+                  className="w-full h-12 gap-2 text-base"
+                  onClick={handleExport}
+                  disabled={noneRecorded || startExport.isPending}
+                  data-testid="button-start-export"
+                >
+                  <FileVideo className="w-5 h-5" />
+                  Export MP4 Video
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Generates a 1280×720 MP4 with each recorded slide's voiceover.
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </main>
     </div>
   );

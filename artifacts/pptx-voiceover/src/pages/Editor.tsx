@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import { useParams, useLocation, Link } from "wouter";
-import { Mic, Square, Play, ArrowLeft, ArrowRight, FileVideo, UploadCloud, ChevronLeft } from "lucide-react";
+import { Mic, Square, ArrowLeft, ArrowRight, FileVideo, ChevronLeft, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useGetPresentation, getGetPresentationQueryKey, useDeleteSlideAudio } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -12,58 +12,53 @@ export default function Editor() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  
+
   const { data: presentation, isLoading } = useGetPresentation(id as string, {
-    query: { enabled: !!id, queryKey: getGetPresentationQueryKey(id as string) }
+    query: { enabled: !!id, queryKey: getGetPresentationQueryKey(id as string) },
   });
 
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
-  
+  const [isUploading, setIsUploading] = useState(false);
+
   const audioChunksRef = useRef<Blob[]>([]);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const slideContainerRef = useRef<HTMLDivElement>(null);
-  const audioPlayerRef = useRef<HTMLAudioElement>(null);
 
   const deleteAudio = useDeleteSlideAudio();
 
   const handleRecordStart = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      
+      const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+
       audioChunksRef.current = [];
       recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          audioChunksRef.current.push(e.data);
-        }
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
       };
-      
+
       recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
         const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        await uploadAudio(audioBlob);
-        
-        // Stop all tracks
-        stream.getTracks().forEach(track => track.stop());
+        await uploadAudioAndImage(audioBlob);
       };
-      
+
       recorder.start();
       setMediaRecorder(recorder);
       setIsRecording(true);
       setRecordingTime(0);
-      
+
       timerRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
+        setRecordingTime((prev) => prev + 1);
       }, 1000);
-      
     } catch (err) {
-      console.error("Microphone access denied or error:", err);
+      console.error("Mic error:", err);
       toast({
-        title: "Microphone Access Denied",
-        description: "Please allow microphone access to record voiceovers.",
-        variant: "destructive"
+        title: "Microphone access denied",
+        description: "Please allow microphone access in your browser settings and try again.",
+        variant: "destructive",
       });
     }
   };
@@ -76,233 +71,277 @@ export default function Editor() {
     }
   };
 
-  const uploadAudio = async (audioBlob: Blob) => {
+  const uploadAudioAndImage = async (audioBlob: Blob) => {
     if (!id) return;
-    
-    // 1. Upload audio
-    const audioFormData = new FormData();
-    audioFormData.append("audio", audioBlob, `slide-${currentSlideIndex}.webm`);
-    
+    setIsUploading(true);
     try {
-      const audioRes = await fetch(`/api/presentations/${id}/slides/${currentSlideIndex}/audio`, {
-        method: "POST",
-        body: audioFormData
-      });
-      
+      // 1. Upload audio
+      const audioForm = new FormData();
+      audioForm.append("audio", audioBlob, `slide-${currentSlideIndex}.webm`);
+      const audioRes = await fetch(
+        `/api/presentations/${id}/slides/${currentSlideIndex}/audio`,
+        { method: "POST", body: audioForm }
+      );
       if (!audioRes.ok) throw new Error("Audio upload failed");
-      
-      // 2. Capture and upload slide image
+
+      // 2. Capture slide container as PNG and upload
       if (slideContainerRef.current) {
         try {
-          const canvas = await html2canvas(slideContainerRef.current);
-          canvas.toBlob(async (imgBlob) => {
-            if (imgBlob) {
-              const imgFormData = new FormData();
-              imgFormData.append("image", imgBlob, `slide-${currentSlideIndex}.png`);
-              await fetch(`/api/presentations/${id}/slides/${currentSlideIndex}/image`, {
-                method: "POST",
-                body: imgFormData
-              });
-            }
-          }, "image/png");
+          const canvas = await html2canvas(slideContainerRef.current, {
+            useCORS: true,
+            allowTaint: true,
+            backgroundColor: "#1a1a2e",
+          });
+          await new Promise<void>((resolve) => {
+            canvas.toBlob(async (imgBlob) => {
+              if (imgBlob) {
+                const imgForm = new FormData();
+                imgForm.append("image", imgBlob, `slide-${currentSlideIndex}.png`);
+                await fetch(
+                  `/api/presentations/${id}/slides/${currentSlideIndex}/image`,
+                  { method: "POST", body: imgForm }
+                );
+              }
+              resolve();
+            }, "image/png");
+          });
         } catch (e) {
-          console.error("Failed to capture slide image", e);
+          console.error("Slide capture failed:", e);
         }
       }
-      
-      toast({ title: "Recording saved" });
+
+      toast({ title: "Voiceover saved", description: `Slide ${currentSlideIndex + 1} recorded.` });
       queryClient.invalidateQueries({ queryKey: getGetPresentationQueryKey(id) });
-      
-    } catch (err) {
-      toast({ title: "Upload failed", variant: "destructive" });
+    } catch {
+      toast({ title: "Upload failed", description: "Could not save the recording.", variant: "destructive" });
+    } finally {
+      setIsUploading(false);
     }
   };
 
   const handleDeleteAudio = () => {
     if (!id) return;
-    deleteAudio.mutate({ id, slideIndex: currentSlideIndex }, {
-      onSuccess: () => {
-        toast({ title: "Audio removed" });
-        queryClient.invalidateQueries({ queryKey: getGetPresentationQueryKey(id) });
+    deleteAudio.mutate(
+      { id, slideIndex: currentSlideIndex },
+      {
+        onSuccess: () => {
+          toast({ title: "Audio removed" });
+          queryClient.invalidateQueries({ queryKey: getGetPresentationQueryKey(id) });
+        },
       }
-    });
+    );
   };
 
-  const formatTime = (seconds: number) => {
-    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
-    const s = (seconds % 60).toString().padStart(2, '0');
-    return `${m}:${s}`;
-  };
+  const formatTime = (s: number) =>
+    `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
 
   if (isLoading || !presentation) {
-    return <div className="min-h-screen flex items-center justify-center"><p>Loading editor...</p></div>;
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-muted-foreground animate-pulse">Loading editor…</div>
+      </div>
+    );
   }
 
-  const currentSlide = presentation.slides.find(s => s.index === currentSlideIndex);
+  const currentSlide = presentation.slides.find((s) => s.index === currentSlideIndex);
+  const isLastSlide = currentSlideIndex === presentation.slideCount - 1;
+  const isFirstSlide = currentSlideIndex === 0;
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden">
       {/* Header */}
       <header className="h-14 border-b border-border bg-card flex items-center justify-between px-4 shrink-0">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           <Link href="/">
-            <Button variant="ghost" size="sm" className="gap-2 text-muted-foreground">
+            <Button variant="ghost" size="sm" className="gap-2 text-muted-foreground" data-testid="button-back">
               <ChevronLeft className="w-4 h-4" />
               Back
             </Button>
           </Link>
-          <div className="h-4 w-px bg-border"></div>
-          <h1 className="font-semibold text-sm truncate max-w-[200px] md:max-w-md">{presentation.filename}</h1>
+          <div className="h-4 w-px bg-border" />
+          <h1 className="font-semibold text-sm truncate max-w-[220px] md:max-w-md" data-testid="text-filename">
+            {presentation.filename}
+          </h1>
         </div>
-        <div className="flex items-center gap-2">
-          <Link href={`/export/${id}`}>
-            <Button size="sm" className="gap-2">
-              <FileVideo className="w-4 h-4" />
-              Export
-            </Button>
-          </Link>
-        </div>
+        <Link href={`/export/${id}`}>
+          <Button size="sm" className="gap-2" data-testid="button-go-export">
+            <FileVideo className="w-4 h-4" />
+            Export Video
+          </Button>
+        </Link>
       </header>
 
-      {/* Main Workspace */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left: Slide Strip */}
-        <div className="w-48 border-r border-border bg-card flex flex-col shrink-0">
-          <div className="p-3 border-b border-border font-medium text-sm text-muted-foreground">
+        {/* Slide Strip */}
+        <div className="w-44 border-r border-border bg-card flex flex-col shrink-0">
+          <div className="px-3 py-2 border-b border-border text-xs font-medium text-muted-foreground uppercase tracking-wider">
             Slides ({presentation.slideCount})
           </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-3">
+          <div className="flex-1 overflow-y-auto p-2 space-y-2">
             {Array.from({ length: presentation.slideCount }).map((_, idx) => {
-              const slide = presentation.slides.find(s => s.index === idx);
+              const slide = presentation.slides.find((s) => s.index === idx);
               const isActive = idx === currentSlideIndex;
-              const hasAudio = slide?.hasAudio;
-
               return (
-                <div 
+                <button
                   key={idx}
                   onClick={() => setCurrentSlideIndex(idx)}
-                  className={`relative cursor-pointer rounded-md overflow-hidden border-2 transition-all ${isActive ? 'border-primary' : 'border-transparent hover:border-border'}`}
+                  className={`w-full relative rounded border-2 overflow-hidden transition-all text-left ${
+                    isActive ? "border-primary" : "border-transparent hover:border-border"
+                  }`}
+                  data-testid={`slide-thumb-${idx}`}
                 >
                   <div className="aspect-[16/9] bg-secondary flex items-center justify-center">
                     {slide?.imageUrl ? (
-                      <img src={slide.imageUrl} alt={`Slide ${idx + 1}`} className="w-full h-full object-cover" />
+                      <img
+                        src={slide.imageUrl}
+                        alt={`Slide ${idx + 1}`}
+                        className="w-full h-full object-cover"
+                      />
                     ) : (
-                      <span className="text-2xl font-bold text-muted-foreground opacity-50">{idx + 1}</span>
+                      <span className="text-xl font-black text-muted-foreground/30">{idx + 1}</span>
                     )}
                   </div>
-                  <div className="absolute top-1 left-1 bg-background/80 backdrop-blur-sm text-xs px-1.5 rounded text-muted-foreground font-mono">
+                  <div className="absolute top-1 left-1 bg-background/80 text-[10px] px-1 rounded font-mono text-muted-foreground">
                     {idx + 1}
                   </div>
-                  {hasAudio && (
-                    <div className="absolute bottom-1 right-1 bg-primary text-primary-foreground p-1 rounded-full shadow-sm">
-                      <Mic className="w-3 h-3" />
+                  {slide?.hasAudio && (
+                    <div className="absolute bottom-1 right-1 w-4 h-4 bg-primary rounded-full flex items-center justify-center shadow">
+                      <Mic className="w-2.5 h-2.5 text-primary-foreground" />
                     </div>
                   )}
-                </div>
+                </button>
               );
             })}
           </div>
         </div>
 
-        {/* Center: Slide Editor & Controls */}
-        <div className="flex-1 flex flex-col bg-secondary/30 relative">
-          
-          {/* Slide Display Area */}
-          <div className="flex-1 flex items-center justify-center p-8 overflow-hidden">
-            <div 
+        {/* Main area */}
+        <div className="flex-1 flex flex-col bg-[#0f0f1a]">
+          {/* Slide Preview */}
+          <div className="flex-1 flex items-center justify-center p-6">
+            <div
               ref={slideContainerRef}
-              className="aspect-[16/9] w-full max-w-5xl bg-card rounded-xl shadow-lg border border-border flex items-center justify-center overflow-hidden relative"
+              className="aspect-[16/9] w-full max-w-4xl bg-[#1a1a2e] rounded-lg shadow-2xl border border-white/5 overflow-hidden flex items-center justify-center relative"
+              data-testid="slide-preview"
             >
-              {/* Fallback PPTX renderer placeholder - in reality pptxjs would render here */}
-              <div className="text-center">
-                <span className="text-8xl font-black text-muted-foreground/20">Slide {currentSlideIndex + 1}</span>
-                <p className="text-muted-foreground mt-4 font-medium">(PPTX Renderer Placeholder)</p>
-              </div>
+              {currentSlide?.imageUrl ? (
+                <img
+                  src={currentSlide.imageUrl}
+                  alt={`Slide ${currentSlideIndex + 1}`}
+                  className="w-full h-full object-contain"
+                  crossOrigin="anonymous"
+                />
+              ) : (
+                <div className="text-center select-none">
+                  <div className="text-[120px] font-black text-white/5 leading-none">
+                    {currentSlideIndex + 1}
+                  </div>
+                  <p className="text-white/20 text-sm mt-2">Slide {currentSlideIndex + 1}</p>
+                </div>
+              )}
+
+              {/* Recording indicator overlay */}
+              {isRecording && (
+                <div className="absolute top-3 right-3 flex items-center gap-2 bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5">
+                  <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                  <span className="text-white text-xs font-mono font-bold">{formatTime(recordingTime)}</span>
+                </div>
+              )}
+
+              {isUploading && (
+                <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                  <div className="text-white text-sm animate-pulse">Saving recording…</div>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Recording Controls Area */}
-          <div className="h-40 border-t border-border bg-card shrink-0 p-6 flex items-center justify-center">
-            
-            <div className="flex items-center gap-12 max-w-3xl w-full">
-              
-              <div className="flex items-center gap-4 w-1/3">
-                <Button 
-                  variant="outline" 
-                  size="icon" 
-                  onClick={() => setCurrentSlideIndex(Math.max(0, currentSlideIndex - 1))}
-                  disabled={currentSlideIndex === 0 || isRecording}
+          {/* Controls bar */}
+          <div className="h-36 border-t border-border bg-card shrink-0 flex items-center justify-center px-8">
+            <div className="flex items-center gap-10 w-full max-w-2xl">
+              {/* Navigation */}
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => setCurrentSlideIndex((p) => Math.max(0, p - 1))}
+                  disabled={isFirstSlide || isRecording}
+                  data-testid="button-prev-slide"
                 >
-                  <ArrowLeft className="w-5 h-5" />
+                  <ArrowLeft className="w-4 h-4" />
                 </Button>
-                <div className="text-sm font-mono text-muted-foreground">
+                <span className="text-sm font-mono text-muted-foreground w-16 text-center">
                   {currentSlideIndex + 1} / {presentation.slideCount}
-                </div>
-                <Button 
-                  variant="outline" 
-                  size="icon" 
-                  onClick={() => setCurrentSlideIndex(Math.min(presentation.slideCount - 1, currentSlideIndex + 1))}
-                  disabled={currentSlideIndex === presentation.slideCount - 1 || isRecording}
+                </span>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() =>
+                    setCurrentSlideIndex((p) => Math.min(presentation.slideCount - 1, p + 1))
+                  }
+                  disabled={isLastSlide || isRecording}
+                  data-testid="button-next-slide"
                 >
-                  <ArrowRight className="w-5 h-5" />
+                  <ArrowRight className="w-4 h-4" />
                 </Button>
               </div>
 
-              <div className="flex flex-col items-center justify-center gap-3 w-1/3">
+              {/* Record Button */}
+              <div className="flex flex-col items-center gap-2 flex-1">
                 {isRecording ? (
-                  <div className="flex items-center gap-4">
-                    <Button 
-                      variant="destructive" 
-                      size="lg"
-                      className="w-16 h-16 rounded-full shadow-lg shadow-destructive/20"
-                      onClick={handleRecordStop}
-                    >
-                      <Square className="w-6 h-6 fill-current" />
-                    </Button>
-                  </div>
-                ) : (
-                  <Button 
-                    variant="default" 
+                  <Button
+                    variant="destructive"
                     size="lg"
-                    className={`w-16 h-16 rounded-full shadow-lg ${currentSlide?.hasAudio ? 'bg-secondary text-foreground hover:bg-secondary/80' : 'bg-primary hover:bg-primary/90'}`}
+                    className="w-16 h-16 rounded-full shadow-lg shadow-red-900/40"
+                    onClick={handleRecordStop}
+                    data-testid="button-stop-record"
+                  >
+                    <Square className="w-5 h-5 fill-current" />
+                  </Button>
+                ) : (
+                  <Button
+                    size="lg"
+                    className={`w-16 h-16 rounded-full shadow-lg transition-all ${
+                      currentSlide?.hasAudio
+                        ? "bg-secondary border border-border text-foreground hover:bg-secondary/80"
+                        : "bg-primary hover:bg-primary/90 shadow-primary/30"
+                    }`}
                     onClick={handleRecordStart}
+                    disabled={isUploading}
+                    data-testid="button-start-record"
                   >
                     <Mic className="w-6 h-6" />
                   </Button>
                 )}
-                
-                <div className="text-center h-6">
-                  {isRecording ? (
-                    <span className="text-destructive font-mono font-bold flex items-center gap-2 animate-pulse">
-                      <span className="w-2 h-2 rounded-full bg-destructive"></span>
-                      Recording {formatTime(recordingTime)}
-                    </span>
-                  ) : currentSlide?.hasAudio ? (
-                    <span className="text-muted-foreground text-sm flex items-center gap-2">
-                      Recorded • {formatTime(currentSlide.audioDurationSeconds || 0)}
-                    </span>
-                  ) : (
-                    <span className="text-muted-foreground text-sm">Ready to record</span>
-                  )}
-                </div>
+                <span className="text-xs text-muted-foreground h-4">
+                  {isRecording
+                    ? "Recording — click to stop"
+                    : isUploading
+                    ? "Saving…"
+                    : currentSlide?.hasAudio
+                    ? `Recorded · ${formatTime(currentSlide.audioDurationSeconds ?? 0)}`
+                    : "Click to record voiceover"}
+                </span>
               </div>
 
-              <div className="flex items-center justify-end gap-2 w-1/3">
+              {/* Delete */}
+              <div className="w-20 flex justify-end">
                 {currentSlide?.hasAudio && !isRecording && (
-                  <Button 
-                    variant="ghost" 
-                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:bg-destructive/10 hover:text-destructive gap-1.5"
                     onClick={handleDeleteAudio}
+                    data-testid="button-delete-audio"
                   >
-                    Delete Audio
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete
                   </Button>
                 )}
               </div>
-
             </div>
           </div>
         </div>
-
       </div>
     </div>
   );

@@ -514,7 +514,7 @@ async function runExport(pres: PresentationData, job: ExportJobData) {
         .outputOptions([
           "-pix_fmt yuv420p",
           `-t ${duration}`,
-          "-vf scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=#1a1a2e",
+          "-vf scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=0x1a1a2e",
           "-tune stillimage",
           "-crf 23",
           "-preset fast",

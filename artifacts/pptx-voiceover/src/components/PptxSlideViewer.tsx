@@ -1,27 +1,22 @@
 import { useState, useEffect, useRef } from "react";
 import JSZip from "jszip";
 
-const SLIDE_W = 9144000;
-const SLIDE_H = 5143500;
+// Native render resolution (16:9, matches PPTX standard 10in × 7.5in at 96dpi)
+const NATIVE_W = 960;
+const NATIVE_H = 540;
+const SLIDE_W_EMU = 9144000;
+const SLIDE_H_EMU = 5143500;
+// 1 EMU → px at native resolution
+const EMU_TO_PX_X = NATIVE_W / SLIDE_W_EMU;
+const EMU_TO_PX_Y = NATIVE_H / SLIDE_H_EMU;
+// Font size: PPTX sz is 100ths of a point, 1pt = 4/3px at 96dpi
+const SZ_TO_PX = (4 / 3) / 100;
 
-function pct(emu: number, total: number) {
-  return (emu / total) * 100;
-}
-
-function getAttr(el: Element, name: string): string {
+function attr(el: Element, name: string): string {
   return el.getAttribute(name) ?? "";
 }
 
-function byTag(parent: Element | Document, local: string): Element[] {
-  const all = parent.getElementsByTagName("*");
-  const out: Element[] = [];
-  for (let i = 0; i < all.length; i++) {
-    if (all[i].localName === local) out.push(all[i]);
-  }
-  return out;
-}
-
-function firstByTag(parent: Element | Document, local: string): Element | null {
+function first(parent: Element | Document, local: string): Element | null {
   const all = parent.getElementsByTagName("*");
   for (let i = 0; i < all.length; i++) {
     if (all[i].localName === local) return all[i];
@@ -29,82 +24,73 @@ function firstByTag(parent: Element | Document, local: string): Element | null {
   return null;
 }
 
+function all(parent: Element | Document, local: string): Element[] {
+  const els = parent.getElementsByTagName("*");
+  const out: Element[] = [];
+  for (let i = 0; i < els.length; i++) {
+    if (els[i].localName === local) out.push(els[i]);
+  }
+  return out;
+}
+
 function parseColor(el: Element): string | null {
-  const srgb = firstByTag(el, "srgbClr");
-  if (srgb) return `#${getAttr(srgb, "val")}`;
-  const scheme = firstByTag(el, "schemeClr");
+  const srgb = first(el, "srgbClr");
+  if (srgb) return `#${attr(srgb, "val")}`;
+  const scheme = first(el, "schemeClr");
   if (scheme) {
-    const val = getAttr(scheme, "val");
-    const schemeMap: Record<string, string> = {
-      dk1: "#000000", lt1: "#ffffff", dk2: "#1f3864",
-      lt2: "#eeeeee", accent1: "#4472c4", accent2: "#ed7d31",
-      accent3: "#a9d18e", accent4: "#ffc000", accent5: "#5b9bd5",
-      accent6: "#70ad47", tx1: "#000000", tx2: "#44546a",
-      bg1: "#ffffff", bg2: "#e7e6e6",
+    const map: Record<string, string> = {
+      dk1: "#000000", lt1: "#ffffff", dk2: "#1f3864", lt2: "#eeeeee",
+      accent1: "#4472c4", accent2: "#ed7d31", accent3: "#a9d18e",
+      accent4: "#ffc000", accent5: "#5b9bd5", accent6: "#70ad47",
+      tx1: "#000000", tx2: "#44546a", bg1: "#ffffff", bg2: "#e7e6e6",
     };
-    return schemeMap[val] ?? null;
+    return map[attr(scheme, "val")] ?? null;
+  }
+  const prstClr = first(el, "prstClr");
+  if (prstClr) {
+    const nameMap: Record<string, string> = {
+      black: "#000000", white: "#ffffff", red: "#ff0000",
+      blue: "#0000ff", green: "#008000",
+    };
+    return nameMap[attr(prstClr, "val")] ?? null;
   }
   return null;
 }
 
-interface TextRun {
-  text: string;
-  bold: boolean;
-  italic: boolean;
-  fontSize: number | null;
-  color: string | null;
-}
-
-interface Paragraph {
-  runs: TextRun[];
-  align: string;
-  spaceBefore: number;
-}
-
-interface ShapeBox {
-  id: string;
-  type: "text" | "image";
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  paragraphs?: Paragraph[];
+interface TextRun { text: string; bold: boolean; italic: boolean; sz: number | null; color: string | null }
+interface Para { runs: TextRun[]; align: string }
+interface Shape {
+  id: string; type: "text" | "image";
+  x: number; y: number; w: number; h: number;
+  paragraphs?: Para[];
   bgColor?: string | null;
   imageSrc?: string;
   rot?: number;
 }
+interface SlideData { bgColor: string; shapes: Shape[] }
 
-interface SlideContent {
-  bgColor: string;
-  shapes: ShapeBox[];
-}
+const zipCache = new Map<string, JSZip>();
+const slideCache = new Map<string, SlideData>();
 
-const cache = new Map<string, JSZip>();
-const slideCache = new Map<string, SlideContent>();
-
-async function getZip(pptxUrl: string): Promise<JSZip> {
-  if (cache.has(pptxUrl)) return cache.get(pptxUrl)!;
-  const res = await fetch(pptxUrl);
-  if (!res.ok) throw new Error("Failed to fetch PPTX");
-  const buf = await res.arrayBuffer();
-  const zip = await JSZip.loadAsync(buf);
-  cache.set(pptxUrl, zip);
+async function getZip(url: string): Promise<JSZip> {
+  if (zipCache.has(url)) return zipCache.get(url)!;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const zip = await JSZip.loadAsync(await res.arrayBuffer());
+  zipCache.set(url, zip);
   return zip;
 }
 
-async function parseSlide(zip: JSZip, slideIdx: number): Promise<SlideContent> {
-  // Slide files are 1-indexed in PPTX
+async function parseSlide(zip: JSZip, slideIdx: number): Promise<SlideData> {
   const slideFiles = Object.keys(zip.files)
     .filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n))
     .sort((a, b) => {
-      const na = parseInt(a.match(/slide(\d+)\.xml/)![1]);
-      const nb = parseInt(b.match(/slide(\d+)\.xml/)![1]);
-      return na - nb;
+      return parseInt(a.match(/slide(\d+)/)![1]) - parseInt(b.match(/slide(\d+)/)![1]);
     });
 
+  if (slideIdx >= slideFiles.length) throw new Error("Slide out of range");
   const slideName = slideFiles[slideIdx];
-  if (!slideName) throw new Error("Slide not found");
-  const slideNum = parseInt(slideName.match(/slide(\d+)\.xml/)![1]);
+  const slideNum = parseInt(slideName.match(/slide(\d+)/)![1]);
 
   const [slideXml, relsXml] = await Promise.all([
     zip.files[slideName].async("string"),
@@ -114,215 +100,165 @@ async function parseSlide(zip: JSZip, slideIdx: number): Promise<SlideContent> {
   const parser = new DOMParser();
   const doc = parser.parseFromString(slideXml, "application/xml");
 
+  // Check for XML parse errors
+  const parseErr = doc.getElementsByTagName("parsererror")[0];
+  if (parseErr) throw new Error("XML parse error: " + parseErr.textContent?.slice(0, 100));
+
   // Build rId → media path map
   const relMap: Record<string, string> = {};
   if (relsXml) {
     const rDoc = parser.parseFromString(relsXml, "application/xml");
-    for (const rel of byTag(rDoc, "Relationship")) {
-      const id = getAttr(rel, "Id");
-      const target = getAttr(rel, "Target");
-      if (target.includes("/media/") || target.includes("../media/")) {
-        const mediaPath = target.startsWith("../")
-          ? "ppt/" + target.slice(3)
-          : target;
-        relMap[id] = mediaPath;
+    for (const rel of all(rDoc, "Relationship")) {
+      const id = attr(rel, "Id");
+      const target = attr(rel, "Target");
+      if (target.includes("media")) {
+        relMap[id] = target.startsWith("../") ? "ppt/" + target.slice(3) : target;
       }
     }
   }
 
-  // Background color
+  // Background
   let bgColor = "#ffffff";
-  const bgRef = firstByTag(doc, "bg");
-  if (bgRef) {
-    const solidFill = firstByTag(bgRef, "solidFill");
-    if (solidFill) {
-      const c = parseColor(solidFill);
-      if (c) bgColor = c;
-    }
+  const bgEl = first(doc, "bg");
+  if (bgEl) {
+    const sf = first(bgEl, "solidFill");
+    if (sf) bgColor = parseColor(sf) ?? bgColor;
   }
 
-  const shapes: ShapeBox[] = [];
-  const spTree = firstByTag(doc, "spTree");
+  const shapes: Shape[] = [];
+  const spTree = first(doc, "spTree");
   if (!spTree) return { bgColor, shapes };
 
-  let shapeId = 0;
+  let sid = 0;
+  const kids = Array.from(spTree.children);
 
-  // Process all child elements of spTree
-  const children = spTree.children;
-  for (let ci = 0; ci < children.length; ci++) {
-    const child = children[ci];
+  for (const child of kids) {
     const tag = child.localName;
 
     if (tag === "sp") {
-      // Text shape
-      const xfrm = firstByTag(child, "xfrm");
+      const xfrm = first(child, "xfrm");
       if (!xfrm) continue;
-      const off = firstByTag(xfrm, "off");
-      const ext = firstByTag(xfrm, "ext");
+      const off = first(xfrm, "off");
+      const ext = first(xfrm, "ext");
       if (!off || !ext) continue;
 
-      const x = pct(parseInt(getAttr(off, "x") || "0"), SLIDE_W);
-      const y = pct(parseInt(getAttr(off, "y") || "0"), SLIDE_H);
-      const w = pct(parseInt(getAttr(ext, "cx") || "0"), SLIDE_W);
-      const h = pct(parseInt(getAttr(ext, "cy") || "0"), SLIDE_H);
-      const rot = parseInt(getAttr(xfrm, "rot") || "0") / 60000; // convert from 1/60000 degree
+      const x = parseInt(attr(off, "x") || "0") * EMU_TO_PX_X;
+      const y = parseInt(attr(off, "y") || "0") * EMU_TO_PX_Y;
+      const w = parseInt(attr(ext, "cx") || "0") * EMU_TO_PX_X;
+      const h = parseInt(attr(ext, "cy") || "0") * EMU_TO_PX_Y;
+      const rot = parseInt(attr(xfrm, "rot") || "0") / 60000;
 
       if (w <= 0 || h <= 0) continue;
 
-      // Background fill of shape
+      // Shape background
       let shapeBg: string | null = null;
-      const spPr = firstByTag(child, "spPr");
+      const spPr = first(child, "spPr");
       if (spPr) {
-        const sf = firstByTag(spPr, "solidFill");
-        if (sf) shapeBg = parseColor(sf);
-        const noFill = firstByTag(spPr, "noFill");
-        if (noFill) shapeBg = "transparent";
+        if (first(spPr, "noFill")) shapeBg = "transparent";
+        else {
+          const sf = first(spPr, "solidFill");
+          if (sf) shapeBg = parseColor(sf);
+        }
       }
 
-      // Parse text body
-      const txBody = firstByTag(child, "txBody");
+      const txBody = first(child, "txBody");
       if (!txBody) continue;
 
-      const paragraphs: Paragraph[] = [];
-      for (const paraEl of byTag(txBody, "p")) {
-        // Paragraph properties
-        const pPr = firstByTag(paraEl, "pPr");
-        const align = pPr ? (getAttr(pPr, "algn") || "l") : "l";
-        const spcBef = pPr ? firstByTag(pPr, "spcBef") : null;
-        let spaceBefore = 0;
-        if (spcBef) {
-          const spcPts = firstByTag(spcBef, "spcPts");
-          if (spcPts) spaceBefore = parseInt(getAttr(spcPts, "val") || "0") / 100;
+      const paragraphs: Para[] = [];
+      for (const paraEl of all(txBody, "p")) {
+        // Only look at direct a:p children, skip nested
+        if (paraEl.parentElement?.localName !== "txBody") continue;
+
+        const pPr = first(paraEl, "pPr");
+        const alignRaw = pPr ? attr(pPr, "algn") : "l";
+        const alignMap: Record<string, string> = { l: "left", ctr: "center", r: "right", just: "justify" };
+        const align = alignMap[alignRaw] ?? "left";
+
+        // Default size from paragraph or body
+        let defSz: number | null = null;
+        const defRPr = first(paraEl, "defRPr");
+        if (defRPr) { const s = attr(defRPr, "sz"); if (s) defSz = parseInt(s) * SZ_TO_PX; }
+        if (!defSz) {
+          const bodyPr = first(txBody, "bodyPr");
+          // Placeholder font size not easily discoverable without slide layout; default to 18pt
+          _ = bodyPr; // suppress unused warning
         }
 
         const runs: TextRun[] = [];
-
-        // Default run props from paragraph
-        let defaultFontSize: number | null = null;
-        const defRPr = firstByTag(paraEl, "defRPr");
-        if (defRPr) {
-          const sz = getAttr(defRPr, "sz");
-          if (sz) defaultFontSize = parseInt(sz) / 100;
-        }
-
-        // Collect runs from <a:r> and line breaks <a:br>
-        const runEls = paraEl.children;
-        for (let ri = 0; ri < runEls.length; ri++) {
-          const rEl = runEls[ri];
+        for (const rEl of Array.from(paraEl.children)) {
           if (rEl.localName === "br") {
-            runs.push({ text: "\n", bold: false, italic: false, fontSize: null, color: null });
+            runs.push({ text: "\n", bold: false, italic: false, sz: null, color: null });
             continue;
           }
           if (rEl.localName !== "r") continue;
 
-          const rPr = firstByTag(rEl, "rPr");
-          let bold = false;
-          let italic = false;
-          let fontSize: number | null = defaultFontSize;
-          let color: string | null = null;
-
+          const rPr = first(rEl, "rPr");
+          const bold = rPr ? attr(rPr, "b") === "1" : false;
+          const italic = rPr ? attr(rPr, "i") === "1" : false;
+          let sz: number | null = defSz;
           if (rPr) {
-            bold = getAttr(rPr, "b") === "1";
-            italic = getAttr(rPr, "i") === "1";
-            const sz = getAttr(rPr, "sz");
-            if (sz) fontSize = parseInt(sz) / 100;
-            const solidFill = firstByTag(rPr, "solidFill");
-            if (solidFill) color = parseColor(solidFill);
+            const s = attr(rPr, "sz");
+            if (s) sz = parseInt(s) * SZ_TO_PX;
+          }
+          let color: string | null = null;
+          if (rPr) {
+            const sf = first(rPr, "solidFill");
+            if (sf) color = parseColor(sf);
           }
 
-          const tEl = firstByTag(rEl, "t");
+          const tEl = first(rEl, "t");
           const text = tEl?.textContent ?? "";
-          if (text) {
-            runs.push({ text, bold, italic, fontSize, color });
-          }
+          if (text) runs.push({ text, bold, italic, sz, color });
         }
 
-        if (runs.length > 0 || paragraphs.length > 0) {
-          paragraphs.push({ runs, align, spaceBefore });
-        }
+        if (runs.length > 0) paragraphs.push({ runs, align });
       }
 
-      if (paragraphs.some((p) => p.runs.length > 0)) {
-        shapes.push({
-          id: `sp-${shapeId++}`,
-          type: "text",
-          x, y, w, h, rot,
-          paragraphs,
-          bgColor: shapeBg,
-        });
+      if (paragraphs.length > 0) {
+        shapes.push({ id: `sp${sid++}`, type: "text", x, y, w, h, rot: rot || undefined, paragraphs, bgColor: shapeBg });
       }
     } else if (tag === "pic") {
-      // Picture shape
-      const xfrm = firstByTag(child, "xfrm");
+      const xfrm = first(child, "xfrm");
       if (!xfrm) continue;
-      const off = firstByTag(xfrm, "off");
-      const ext = firstByTag(xfrm, "ext");
+      const off = first(xfrm, "off");
+      const ext = first(xfrm, "ext");
       if (!off || !ext) continue;
 
-      const x = pct(parseInt(getAttr(off, "x") || "0"), SLIDE_W);
-      const y = pct(parseInt(getAttr(off, "y") || "0"), SLIDE_H);
-      const w = pct(parseInt(getAttr(ext, "cx") || "0"), SLIDE_W);
-      const h = pct(parseInt(getAttr(ext, "cy") || "0"), SLIDE_H);
-
+      const x = parseInt(attr(off, "x") || "0") * EMU_TO_PX_X;
+      const y = parseInt(attr(off, "y") || "0") * EMU_TO_PX_Y;
+      const w = parseInt(attr(ext, "cx") || "0") * EMU_TO_PX_X;
+      const h = parseInt(attr(ext, "cy") || "0") * EMU_TO_PX_Y;
       if (w <= 0 || h <= 0) continue;
 
-      // Find image relationship
-      const blip = firstByTag(child, "blip");
+      const blip = first(child, "blip");
       if (!blip) continue;
-
-      // rEmbed attribute with namespace prefix
-      let rId = blip.getAttribute("r:embed") ?? blip.getAttribute("embed") ?? "";
-      // Try all attributes
-      const attrs = blip.attributes;
-      for (let ai = 0; ai < attrs.length; ai++) {
-        if (attrs[ai].localName === "embed") {
-          rId = attrs[ai].value;
-          break;
-        }
+      let rId = "";
+      const ats = blip.attributes;
+      for (let ai = 0; ai < ats.length; ai++) {
+        if (ats[ai].localName === "embed") { rId = ats[ai].value; break; }
       }
-
       const mediaPath = relMap[rId];
-      if (!mediaPath) continue;
-
-      const mediaFile = zip.files[mediaPath];
-      if (!mediaFile) continue;
+      if (!mediaPath || !zip.files[mediaPath]) continue;
 
       const ext2 = mediaPath.split(".").pop()?.toLowerCase() ?? "png";
       const mimeMap: Record<string, string> = {
         png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-        gif: "image/gif", webp: "image/webp", bmp: "image/bmp",
-        svg: "image/svg+xml",
+        gif: "image/gif", webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml",
       };
-      const mime = mimeMap[ext2] ?? "image/png";
-
-      const data = await mediaFile.async("base64");
-      const imageSrc = `data:${mime};base64,${data}`;
-
+      const data = await zip.files[mediaPath].async("base64");
       shapes.push({
-        id: `pic-${shapeId++}`,
-        type: "image",
-        x, y, w, h,
-        imageSrc,
+        id: `pic${sid++}`, type: "image", x, y, w, h,
+        imageSrc: `data:${mimeMap[ext2] ?? "image/png"};base64,${data}`,
       });
-    } else if (tag === "grpSp") {
-      // Group shape — flatten by processing its children too
-      // (simplified: skip for now)
     }
   }
 
-  // Sort: images first, then text on top
-  shapes.sort((a, b) => {
-    if (a.type === "image" && b.type === "text") return -1;
-    if (a.type === "text" && b.type === "image") return 1;
-    return 0;
-  });
-
+  shapes.sort((a, b) => (a.type === "image" && b.type === "text" ? -1 : a.type === "text" && b.type === "image" ? 1 : 0));
   return { bgColor, shapes };
 }
 
-const alignMap: Record<string, string> = {
-  l: "left", ctr: "center", r: "right", just: "justify",
-};
+// Suppress unused variable warning
+const _: unknown = undefined;
 
 interface Props {
   presentationId: string;
@@ -331,62 +267,71 @@ interface Props {
 }
 
 export default function PptxSlideViewer({ presentationId, slideIndex, className }: Props) {
-  const [content, setContent] = useState<SlideContent | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<SlideData | null>(null);
   const [loading, setLoading] = useState(true);
-  const abortRef = useRef<AbortController | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [scale, setScale] = useState(1);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Compute CSS scale to fit native 960×540 into the container
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const obs = new ResizeObserver(([entry]) => {
+      const w = entry.contentRect.width;
+      setScale(w / NATIVE_W);
+    });
+    obs.observe(containerRef.current);
+    return () => obs.disconnect();
+  }, []);
 
   useEffect(() => {
-    setLoading(true);
-    setError(null);
-
     const key = `${presentationId}:${slideIndex}`;
     if (slideCache.has(key)) {
-      setContent(slideCache.get(key)!);
+      setData(slideCache.get(key)!);
       setLoading(false);
       return;
     }
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+    const ctrl = new AbortController();
+    setLoading(true);
+    setError(null);
 
     (async () => {
       try {
         const zip = await getZip(`/api/presentations/${presentationId}/file`);
-        if (controller.signal.aborted) return;
+        if (ctrl.signal.aborted) return;
         const result = await parseSlide(zip, slideIndex);
-        if (controller.signal.aborted) return;
+        if (ctrl.signal.aborted) return;
         slideCache.set(key, result);
-        setContent(result);
+        setData(result);
       } catch (e) {
-        if (!controller.signal.aborted) {
-          setError("Could not render slide preview");
-          console.error(e);
+        if (!ctrl.signal.aborted) {
+          const msg = e instanceof Error ? e.message : String(e);
+          setError(msg);
+          console.warn(`[PptxSlideViewer] slide ${slideIndex}:`, msg);
         }
       } finally {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!ctrl.signal.aborted) setLoading(false);
       }
     })();
 
-    return () => {
-      controller.abort();
-    };
+    return () => ctrl.abort();
   }, [presentationId, slideIndex]);
 
   if (loading) {
     return (
-      <div className={`flex items-center justify-center bg-white ${className ?? ""}`}>
-        <div className="text-sm text-gray-400 animate-pulse">Loading slide…</div>
+      <div ref={containerRef} className={`flex items-center justify-center bg-white ${className ?? ""}`}>
+        <div className="text-xs text-gray-400 animate-pulse">Loading…</div>
       </div>
     );
   }
 
-  if (error || !content) {
+  if (error || !data) {
     return (
-      <div className={`flex items-center justify-center bg-gray-50 ${className ?? ""}`}>
-        <div className="text-center text-gray-400">
-          <div className="text-5xl font-black opacity-20 mb-2">{slideIndex + 1}</div>
-          <div className="text-xs">Slide {slideIndex + 1}</div>
+      <div ref={containerRef} className={`flex items-center justify-center bg-gray-50 ${className ?? ""}`}>
+        <div className="text-center text-gray-300 select-none">
+          <div className="text-5xl font-black">{slideIndex + 1}</div>
+          <div className="text-xs mt-1">Slide {slideIndex + 1}</div>
         </div>
       </div>
     );
@@ -394,82 +339,87 @@ export default function PptxSlideViewer({ presentationId, slideIndex, className 
 
   return (
     <div
+      ref={containerRef}
       className={`relative overflow-hidden ${className ?? ""}`}
-      style={{ backgroundColor: content.bgColor }}
+      style={{ backgroundColor: data.bgColor }}
     >
-      {content.shapes.map((shape) => {
-        if (shape.type === "image") {
-          return (
-            <img
-              key={shape.id}
-              src={shape.imageSrc}
-              alt=""
-              style={{
-                position: "absolute",
-                left: `${shape.x}%`,
-                top: `${shape.y}%`,
-                width: `${shape.w}%`,
-                height: `${shape.h}%`,
-                objectFit: "cover",
-                transform: shape.rot ? `rotate(${shape.rot}deg)` : undefined,
-              }}
-            />
-          );
-        }
-
-        if (shape.type === "text") {
+      {/* Fixed-size native canvas, scaled to fit container */}
+      <div
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          width: NATIVE_W,
+          height: NATIVE_H,
+          transformOrigin: "top left",
+          transform: `scale(${scale})`,
+        }}
+      >
+        {data.shapes.map((shape) => {
+          if (shape.type === "image") {
+            return (
+              <img
+                key={shape.id}
+                src={shape.imageSrc}
+                alt=""
+                style={{
+                  position: "absolute",
+                  left: shape.x,
+                  top: shape.y,
+                  width: shape.w,
+                  height: shape.h,
+                  objectFit: "fill",
+                }}
+              />
+            );
+          }
           return (
             <div
               key={shape.id}
               style={{
                 position: "absolute",
-                left: `${shape.x}%`,
-                top: `${shape.y}%`,
-                width: `${shape.w}%`,
-                height: `${shape.h}%`,
+                left: shape.x,
+                top: shape.y,
+                width: shape.w,
+                height: shape.h,
                 overflow: "hidden",
-                backgroundColor: shape.bgColor === "transparent" ? undefined : (shape.bgColor ?? undefined),
+                backgroundColor: shape.bgColor && shape.bgColor !== "transparent" ? shape.bgColor : undefined,
                 transform: shape.rot ? `rotate(${shape.rot}deg)` : undefined,
+                padding: "2px 4px",
+                boxSizing: "border-box",
               }}
             >
               {shape.paragraphs?.map((para, pi) => (
                 <p
                   key={pi}
                   style={{
-                    textAlign: (alignMap[para.align] as React.CSSProperties["textAlign"]) ?? "left",
                     margin: 0,
-                    paddingTop: para.spaceBefore ? `${para.spaceBefore * 0.15}%` : 0,
-                    lineHeight: 1.2,
+                    lineHeight: 1.25,
+                    textAlign: para.align as React.CSSProperties["textAlign"],
                     whiteSpace: "pre-wrap",
                     wordBreak: "break-word",
                   }}
                 >
-                  {para.runs.map((run, ri) => {
-                    const fontSize = run.fontSize
-                      ? `${(run.fontSize / 72) * (100 / 7.5)}vh`
-                      : undefined;
-                    return (
-                      <span
-                        key={ri}
-                        style={{
-                          fontWeight: run.bold ? "bold" : "normal",
-                          fontStyle: run.italic ? "italic" : "normal",
-                          fontSize,
-                          color: run.color ?? undefined,
-                        }}
-                      >
-                        {run.text}
-                      </span>
-                    );
-                  })}
+                  {para.runs.map((run, ri) => (
+                    <span
+                      key={ri}
+                      style={{
+                        fontFamily: "Calibri, Arial, sans-serif",
+                        fontWeight: run.bold ? "bold" : "normal",
+                        fontStyle: run.italic ? "italic" : "normal",
+                        fontSize: run.sz ? `${run.sz}px` : "18px",
+                        color: run.color ?? "#000000",
+                      }}
+                    >
+                      {run.text}
+                    </span>
+                  ))}
                 </p>
               ))}
             </div>
           );
-        }
-
-        return null;
-      })}
+        })}
+      </div>
     </div>
   );
 }
